@@ -68,17 +68,10 @@ async def forgot_password(data: ForgotPasswordDTO):
     return {"message": "OTP sent to your email."}
 
 
-# Verify OTP
-@router.post("/verify-otp", status_code=status.HTTP_200_OK)
-async def verify_otp(data: VerifyOtpDTO):
-    token = AuthService.verify_otp_reset_password(data)
-    return {"reset_token": token}
-
-
 # Reset password
 @router.post("/reset-password", status_code=status.HTTP_200_OK)
 async def reset_password(data: ResetPasswordDTO):
-    AuthService.reset_password(data)
+    await AuthService.reset_password(data)
     return {"message": "Password has been reset successfully."}
 
 

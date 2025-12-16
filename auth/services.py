@@ -263,7 +263,10 @@ class AuthService:
         Validate reset token and update password.
         """
         try:
-            user = users_collection.find_one({"email": data.email, "roles": data.type})
+            user = users_collection.find_one({
+    "email": data.email,
+    "roles": {"$in": [data.type]}
+})
             now = int(time.time())
 
             if not user:
@@ -291,7 +294,10 @@ class AuthService:
                 {"_id": user["_id"]},
                 {
                     "$set": {"password_hash": hashed},
-                    "$unset": {"reset_token": "", "reset_token_expiry": ""}
+                    "$unset": {
+    "reset_token": 1,
+    "reset_token_expiry": 1
+}
                 }
             )
 

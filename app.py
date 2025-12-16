@@ -24,7 +24,7 @@ from azure.identity import DefaultAzureCredential
 from azure.ai.agents.models import ListSortOrder
 from history import get_or_create_thread, save_message
 import logging
-from file_routes import router as file_router
+from template_file_routes import router as template_router
 
 logger = logging.getLogger("app")
 logger.setLevel(logging.INFO)
@@ -60,7 +60,7 @@ allow_origins=[
 app.add_middleware(JWTMiddleware)
 app.include_router(auth_router)
 app.include_router(chat_router)
-app.include_router(file_router)
+app.include_router(template_router)
 
 
 
