@@ -9,11 +9,8 @@ import docx
 from auth.routes import router as auth_router
 from auth.middleware import JWTMiddleware
 from fastapi.responses import FileResponse
-# ---------------------- AUTH + SESSION ----------------------
-from auth.routes import router as auth_router
-from auth.middleware import JWTMiddleware
 from chat_routes import router as chat_router
-
+from template_file_routes import router as template_router
 import re
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
@@ -24,10 +21,7 @@ from azure.identity import DefaultAzureCredential
 from azure.ai.agents.models import ListSortOrder
 from history import get_or_create_thread, save_message
 import logging
-from template_file_routes import router as template_router
-
 from dotenv import load_dotenv
-
 
 # -------------------------------------------------
 # ENV & LOGGER
@@ -36,32 +30,28 @@ load_dotenv()
 logger = logging.getLogger("app")
 logger.setLevel(logging.INFO)
 
-
 # ================================================================
 #                     INIT FASTAPI APP
 # ================================================================
 app = FastAPI()
 
- 
 app.add_middleware(
     CORSMiddleware,
-allow_origins=[
+    allow_origins=[
         "http://localhost:5173",
         "http://localhost:3000",
         "http://127.0.0.1:5173",
-        # Add the other person's frontend URL here
     ],
     allow_credentials=True,
-  # Must be False with "*"
     allow_methods=["*"],
     allow_headers=[
-    "Authorization",
-    "Content-Type",
-    "Accept",
-    "Origin",
-    "User-Agent",
-    "X-Requested-With"],
-
+        "Authorization",
+        "Content-Type",
+        "Accept",
+        "Origin",
+        "User-Agent",
+        "X-Requested-With"
+    ],
 )
 
 app.add_middleware(JWTMiddleware)
@@ -69,20 +59,30 @@ app.include_router(auth_router)
 app.include_router(chat_router)
 app.include_router(template_router)
 
-
-
 # ================================================================
 #                        Azure Setup
 # ================================================================
+# Create DefaultAzureCredential
+credential = DefaultAzureCredential()
+
+# Health check for Managed Identity at startup
+@app.on_event("startup")
+async def check_managed_identity():
+    try:
+        # Request a token for Cognitive Services
+        token = credential.get_token("https://cognitiveservices.azure.com/.default")
+        logger.info("✅ Managed Identity works. Token acquired")
+    except Exception as e:
+        logger.error(f"❌ Managed Identity failed: {e}")
+
+# Initialize AIProjectClient
 project_client = AIProjectClient(
-    endpoint="https://agenticainew.services.ai.azure.com/api/projects/agenticaitest",
-    credential=DefaultAzureCredential()
+    endpoint=os.getenv("AGENT_ENDPOINT"),
+    credential=credential
 )
 
 # Legal Template Generator Agent
-
 legal_agent = project_client.agents.get_agent(agent_id=os.getenv("LEGAL_AGENT_ID"))
-
 
 # ================================================================
 #                     DOCUMENT PROCESSING
@@ -98,15 +98,12 @@ def extract_text_from_pdf(file_path: str) -> str:
         raise HTTPException(status_code=500, detail=f"Error processing PDF: {e}")
 
 def extract_pdf_block(text: str):
-    """Extracts content inside [PDF_DOCUMENT] tags."""
     match = re.search(r"\[PDF_DOCUMENT\](.*?)\[/PDF_DOCUMENT\]", text, re.DOTALL)
     if match:
         return match.group(1).strip()
     return None
 
-
 def create_pdf_from_text(text: str, output_path: str):
-    """Creates a PDF file from plain text."""
     c = canvas.Canvas(output_path, pagesize=letter)
     width, height = letter
 
@@ -114,11 +111,9 @@ def create_pdf_from_text(text: str, output_path: str):
     for line in text.split("\n"):
         c.drawString(40, y, line)
         y -= 15
-
         if y < 40:
             c.showPage()
             y = height - 40
-
     c.save()
 
 def extract_text_from_docx(file_path: str) -> str:
@@ -128,14 +123,12 @@ def extract_text_from_docx(file_path: str) -> str:
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing DOCX: {e}")
 
-
 def extract_text_from_txt(file_path: str) -> str:
     try:
         with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
             return f.read()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing TXT: {e}")
-
 
 def extract_text(file_path: str, filename: str) -> str:
     ext = filename.lower().split(".")[-1]
@@ -144,9 +137,9 @@ def extract_text(file_path: str, filename: str) -> str:
     if ext == "txt": return extract_text_from_txt(file_path)
     return ""
 
-
 # ================================================================
 #                         MAIN ENDPOINT
+# ================================================================
 @app.post("/query")
 async def query_endpoint(
     request: Request,
@@ -162,7 +155,6 @@ async def query_endpoint(
     user = getattr(request.state, "user", None)
     if not user:
         raise HTTPException(status_code=401, detail="Unauthorized")
-
     user_id = user.get("sub")
     if not user_id:
         raise HTTPException(status_code=401, detail="Invalid token")
@@ -171,7 +163,6 @@ async def query_endpoint(
     # 2. Extract file content
     # ----------------------------
     extra_context = ""
-
     if user_file:
         with tempfile.NamedTemporaryFile(
             delete=False,
@@ -180,7 +171,6 @@ async def query_endpoint(
             content = await user_file.read()
             tmp.write(content)
             tmp_path = tmp.name
-
         try:
             file_text = extract_text(tmp_path, user_file.filename)
             extra_context = f"\n\nUser-provided document context:\n{file_text[:3000]}"
@@ -196,14 +186,12 @@ async def query_endpoint(
         thread = project_client.agents.threads.get(thread_id=thread_id)
     else:
         thread = project_client.agents.threads.create()
-
     thread_id = thread.id
 
     # ----------------------------
     # 4. Store thread + user message
     # ----------------------------
     await get_or_create_thread(thread_id, user_id, question)
-
     await save_message(
         thread_id=thread_id,
         user_id=user_id,
