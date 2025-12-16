@@ -33,6 +33,9 @@ from dotenv import load_dotenv
 # ENV & LOGGER
 # -------------------------------------------------
 load_dotenv()
+logger = logging.getLogger("app")
+logger.setLevel(logging.INFO)
+
 
 # ================================================================
 #                     INIT FASTAPI APP
