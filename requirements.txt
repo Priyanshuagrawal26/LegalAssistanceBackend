@@ -17,4 +17,3 @@ email-validator
 python-docx
 motor
 reportlab
-azure.communicaion.s
