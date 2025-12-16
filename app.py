@@ -26,9 +26,13 @@ from history import get_or_create_thread, save_message
 import logging
 from template_file_routes import router as template_router
 
-logger = logging.getLogger("app")
-logger.setLevel(logging.INFO)
+from dotenv import load_dotenv
 
+
+# -------------------------------------------------
+# ENV & LOGGER
+# -------------------------------------------------
+load_dotenv()
 
 # ================================================================
 #                     INIT FASTAPI APP
@@ -73,8 +77,8 @@ project_client = AIProjectClient(
 )
 
 # Legal Template Generator Agent
-LEGAL_AGENT_ID = "asst_fwWdgF8Cgictvs1r3xnbNCNa"
-legal_agent = project_client.agents.get_agent(agent_id=LEGAL_AGENT_ID)
+
+legal_agent = project_client.agents.get_agent(agent_id=os.getenv("LEGAL_AGENT_ID"))
 
 
 # ================================================================
