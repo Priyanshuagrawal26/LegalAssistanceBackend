@@ -4,12 +4,12 @@ import logging
 import fitz as pymupdf  # PyMuPDF
 
 from fastapi import APIRouter, UploadFile, File, HTTPException
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse
 
 from azure.storage.blob import BlobServiceClient
 from azure.ai.formrecognizer import DocumentAnalysisClient
 from azure.core.credentials import AzureKeyCredential
-
+import mimetypes
 from dotenv import load_dotenv
 from docx import Document
 
@@ -56,6 +56,15 @@ form_recognizer_client = DocumentAnalysisClient(
 
 FOLDER_NAME = "user_templates"
 
+def text_to_html(text: str) -> str:
+    lines = [line.strip() for line in text.split("\n") if line.strip()]
+
+    html = ""
+    for line in lines:
+        html += f"<p>{line}</p>\n"
+
+    return html
+
 # =================================================
 #               UPLOAD FILE
 # =================================================
@@ -98,23 +107,19 @@ def view_file(filename: str):
         blob_client = container_client.get_blob_client(blob_path)
 
         if not blob_client.exists():
-            logger.warning(f"File not found: {blob_path}")
             raise HTTPException(status_code=404, detail="File not found")
 
         file_bytes = blob_client.download_blob().readall()
         ext = filename.lower().split(".")[-1]
 
-        logger.info(f"Processing file | ext={ext} | size={len(file_bytes)} bytes")
-
         text = ""
 
-        # ---------- TXT / HTML ----------
+        # TXT / HTML
         if ext in ["txt", "html"]:
             text = file_bytes.decode("utf-8", errors="ignore")
 
-        # ---------- DOCX ----------
+        # DOCX
         elif ext == "docx":
-            logger.info("Extracting DOCX text")
             with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp:
                 tmp.write(file_bytes)
                 path = tmp.name
@@ -123,9 +128,8 @@ def view_file(filename: str):
             text = "\n".join(p.text for p in doc.paragraphs)
             os.remove(path)
 
-        # ---------- PDF ----------
+        # PDF
         elif ext == "pdf":
-            logger.info("Extracting PDF text (native)")
             with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
                 tmp.write(file_bytes)
                 pdf_path = tmp.name
@@ -135,9 +139,7 @@ def view_file(filename: str):
                 text += page.get_text()
             pdf.close()
 
-            # OCR fallback
             if not text.strip():
-                logger.info("PDF appears scanned → running OCR")
                 with open(pdf_path, "rb") as f:
                     poller = form_recognizer_client.begin_analyze_document(
                         model_id="prebuilt-read",
@@ -151,9 +153,8 @@ def view_file(filename: str):
 
             os.remove(pdf_path)
 
-        # ---------- IMAGES ----------
+        # IMAGES
         elif ext in ["jpg", "jpeg", "png"]:
-            logger.info("Extracting image OCR")
             with tempfile.NamedTemporaryFile(delete=False, suffix=f".{ext}") as tmp:
                 tmp.write(file_bytes)
                 img_path = tmp.name
@@ -172,21 +173,19 @@ def view_file(filename: str):
             os.remove(img_path)
 
         else:
-            logger.warning(f"Unsupported file type: {ext}")
-            text = "File type not supported."
+            text = "Unsupported file type"
 
-        logger.info(f"Text extraction completed | chars={len(text)}")
+        # 🔥 CONVERT TEXT → HTML
+        html = text_to_html(text)
 
         return PlainTextResponse(
-            text,
-            media_type="text/plain; charset=utf-8",
-            headers={"Content-Disposition": "inline"}
+            html,
+            media_type="text/html; charset=utf-8"
         )
 
     except Exception as e:
-        logger.exception("Error while viewing file")
+        logger.exception("View error")
         raise HTTPException(status_code=500, detail=str(e))
-
 # =================================================
 #               LIST FILES
 # =================================================
