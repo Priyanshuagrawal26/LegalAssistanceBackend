@@ -2,10 +2,10 @@ import os
 import tempfile
 import logging
 import fitz as pymupdf  # PyMuPDF
-
+from fastapi.security import HTTPBearer
 from fastapi import APIRouter, UploadFile, File, HTTPException
 from fastapi.responses import PlainTextResponse, StreamingResponse
-
+from pymongo import MongoClient
 from azure.storage.blob import BlobServiceClient
 from azure.ai.formrecognizer import DocumentAnalysisClient
 from azure.core.credentials import AzureKeyCredential
@@ -29,6 +29,14 @@ CONTAINER_NAME = os.getenv("AZURE_BLOB_CONTAINER_NAME", "file-uploads")
 
 FORM_ENDPOINT = os.getenv("AZURE_FORM_RECOGNIZER_ENDPOINT")
 FORM_KEY = os.getenv("AZURE_FORM_RECOGNIZER_KEY")
+
+MONGO_URI = os.getenv("MONGO_URI")
+DB_NAME = os.getenv("MONGO_DB_NAME")
+
+mongo_client = MongoClient(MONGO_URI)
+db = mongo_client[DB_NAME]
+users_collection = db.users
+ 
 
 if not BLOB_CONN_STR:
     logger.critical("AZURE_STORAGE_CONNECTION_STRING missing")
@@ -55,6 +63,7 @@ form_recognizer_client = DocumentAnalysisClient(
 )
 
 FOLDER_NAME = "user_templates"
+bearer_scheme = HTTPBearer()
 
 def text_to_html(text: str) -> str:
     lines = [line.strip() for line in text.split("\n") if line.strip()]

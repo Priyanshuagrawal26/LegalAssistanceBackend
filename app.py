@@ -49,6 +49,7 @@ allow_origins=[
         "http://localhost:5173",
         "http://localhost:3000",
         "http://127.0.0.1:5173",
+        
         # Add the other person's frontend URL here
     ],
     allow_credentials=True,
@@ -146,7 +147,7 @@ def extract_text(file_path: str, filename: str) -> str:
  
  
 # ================================================================
-#                         MAIN ENDPOINT
+#                           MAIN ENDPOINT
 @app.post("/query")
 async def query_endpoint(
     request: Request,
@@ -235,13 +236,14 @@ async def query_endpoint(
         thread_id=thread_id,
         order=ListSortOrder.ASCENDING
     )
- 
+   
     reply_text = ""
     pdf_files = []
  
     for msg in messages:
         if msg.run_id == run.id and getattr(msg, "text_messages", None):
             reply_text = msg.text_messages[-1].text.value.strip()
+            print("botResponse:::::", reply_text)
  
     # ----------------------------
     # 7. Optional PDF detection

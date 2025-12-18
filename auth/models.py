@@ -16,14 +16,14 @@ class SignUpRequestDTO(BaseModel):
     email: EmailStr
     password: str
     full_name: Optional[str]
-    captcha_token: str
+    # captcha_token: str
 
 
 class LoginDTO(BaseModel):
     email: EmailStr
     password: str
     type: Literal["admin", "user"]
-    captcha_token: str
+    # captcha_token: str
 
 
 class LoginResponseDTO(BaseModel):

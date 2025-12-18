@@ -12,7 +12,7 @@ router = APIRouter(prefix="/auth", tags=["Auth"])
 # Signup
 @router.post("/signup", response_model=SignUpResponse, status_code=status.HTTP_201_CREATED)
 async def signup(data: SignUpRequestDTO):
-    await verify_captcha(data.captcha_token)
+    # await verify_captcha(data.captcha_token)
     await AuthService.sign_up(data)   # <-- MUST await because it's async
     return {"message": "OTP sent to email"}
 
@@ -26,7 +26,7 @@ async def verify_signup(data: VerifyOtpDTO):
 
 @router.post("/login", status_code=202)
 async def login(data: LoginDTO):
-    await verify_captcha(data.captcha_token)
+    # await verify_captcha(data.captcha_token)
     result = await AuthService.login(data)
     return result
 
