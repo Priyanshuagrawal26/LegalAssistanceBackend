@@ -2,6 +2,7 @@ from fastapi import APIRouter, Request, HTTPException
 from bson import ObjectId
 from db import chat_messages, chat_threads
 router = APIRouter(prefix="/chat", tags=["Chat"])
+
 @router.get("/threads")
 async def get_user_threads(request: Request):
     user = request.state.user

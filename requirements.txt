@@ -20,3 +20,4 @@ reportlab
 azure-communication-email
 azure-ai-vision-imageanalysis
 azure-core
+pypdf

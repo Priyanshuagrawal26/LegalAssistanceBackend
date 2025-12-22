@@ -24,7 +24,7 @@ from azure.identity import DefaultAzureCredential
 from azure.ai.agents.models import ListSortOrder
 from history import get_or_create_thread, save_message
 import logging
-from template_file_routes import router as template_router
+from templates_router import router as templates_router
  
 from dotenv import load_dotenv
  
@@ -42,34 +42,24 @@ logger.setLevel(logging.INFO)
 # ================================================================
 app = FastAPI()
  
- 
 app.add_middleware(
     CORSMiddleware,
-allow_origins=[
-        "http://localhost:5173",
-        "http://localhost:3000",
-        "http://127.0.0.1:5173",
+    allow_origins=[
         "https://lexiaifrontend.azurewebsites.net",
-        
-        # Add the other person's frontend URL here
+        "http://localhost:5173",
+        "http://localhost:5174",
+        "http://127.0.0.1:5173",
+        "http://localhost:3000",
     ],
     allow_credentials=True,
-  # Must be False with "*"
     allow_methods=["*"],
-    allow_headers=[
-    "Authorization",
-    "Content-Type",
-    "Accept",
-    "Origin",
-    "User-Agent",
-    "X-Requested-With"],
- 
+    allow_headers=["*"],
 )
  
 app.add_middleware(JWTMiddleware)
 app.include_router(auth_router)
 app.include_router(chat_router)
-app.include_router(template_router)
+app.include_router(templates_router)
  
  
  
