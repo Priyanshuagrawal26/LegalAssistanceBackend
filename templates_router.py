@@ -159,7 +159,6 @@ def list_templates(request: Request, user=Depends(get_current_user)):
         "templates": templates
     }
 
-
 # ============================================================
 # FETCH TEMPLATE CONTENT (ALWAYS TEXT)
 @router.get("/view/{template_id}")
@@ -207,7 +206,28 @@ def view_template(
 
     print("✔ TEMPLATE FOUND:", template)
 
-    # Load from blob
+    # ⭐⭐⭐ NEW LOGIC: RETURN EDITED HTML IF EXISTS
+    if "edited_blob" in template:
+        try:
+            print("✔ FOUND EDITED HTML VERSION — USING edited_blob =", template["edited_blob"])
+
+            edited_blob_client = container_client.get_blob_client(template["edited_blob"])
+            edited_html = edited_blob_client.download_blob().readall().decode("utf-8")
+
+            print("✔ EDITED HTML LENGTH =", len(edited_html))
+
+            return {
+                "template_id": template_id,
+                "file_name": template["file_name"],
+                "content": edited_html,
+                "edited": True
+            }
+
+        except Exception as e:
+            print("❌ Failed to load edited blob, falling back to original:", e)
+
+
+    # ⭐ Continue with ORIGINAL file extraction logic (unchanged)
     blob_path = template["blob_name"]
     print("✔ BLOB PATH =", blob_path)
 
@@ -292,8 +312,10 @@ def view_template(
     return {
         "template_id": template_id,
         "file_name": file_name,
-        "content": content
+        "content": content,
+        "edited": False
     }
+
 
 # ============================================================
 # DELETE TEMPLATE
@@ -338,4 +360,34 @@ def delete_template(
         "status": "success",
         "message": "Template deleted",
         "template_id": template_id
+    }
+
+@router.post("/save/{template_id}")
+async def save_template(
+    template_id: str,
+    request: Request,
+    content: str = Form(...),
+    user=Depends(get_current_user)
+):
+    user_id = request.state.user_id
+
+    if not user_id or not ObjectId.is_valid(user_id):
+        raise HTTPException(status_code=400, detail="Invalid user_id")
+
+    # New blob where edited HTML will be saved
+    edited_blob_name = f"{user_id}/{template_id}_edited.html"
+
+    blob_client = container_client.get_blob_client(edited_blob_name)
+    blob_client.upload_blob(content.encode("utf-8"), overwrite=True)
+
+    # Save the edited blob in DB (without touching original blob)
+    users_collection.update_one(
+        {"_id": ObjectId(user_id), "templates.template_id": template_id},
+        {"$set": {"templates.$.edited_blob": edited_blob_name}}
+    )
+
+    return {
+        "status": "success",
+        "message": "Template saved",
+        "edited_blob": edited_blob_name
     }
