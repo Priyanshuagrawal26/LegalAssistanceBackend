@@ -98,40 +98,73 @@ class AuthService:
     @staticmethod
     async def login(creds: LoginDTO) -> None:
         """
-        Validate password, generate OTP and send it to user email.
-        The client must call /auth/login/verify with OTP to receive tokens.
+        Step 1: Validate user, password, and requested role.
+        Step 2: Generate OTP and send it to email.
         """
+        logger.info(f"[LOGIN] Login attempt for email: {creds.email}, requested_type: {creds.type}")
+
         try:
+            # ---------------------- FIND USER ----------------------
             user = users_collection.find_one({"email": creds.email})
             if not user:
-                # To avoid revealing whether account exists you could return same message
+                logger.warning(f"[LOGIN] No user found with email: {creds.email}")
                 raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
 
-            stored = user.get("password_hash", "").encode("utf-8")
-            if not bcrypt.checkpw(creds.password.encode("utf-8"), stored):
+            logger.info(f"[LOGIN] User found: {creds.email}")
+
+            # ---------------------- PASSWORD CHECK ----------------------
+            stored_hash = user.get("password_hash", "").encode("utf-8")
+            if not bcrypt.checkpw(creds.password.encode("utf-8"), stored_hash):
+                logger.warning(f"[LOGIN] Wrong password for {creds.email}")
                 raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
 
-            if not user.get("is_verified"):
+            logger.info(f"[LOGIN] Password OK for {creds.email}")
+
+            # ---------------------- VERIFIED CHECK ----------------------
+            if not user.get("is_verified", False):
+                logger.warning(f"[LOGIN] Unverified account: {creds.email}")
                 raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account not verified")
 
-            # generate OTP for login flow
+            # ---------------------- ROLE CHECK ----------------------
+            requested_role = creds.type.lower().strip()
+            actual_roles = [r.lower() for r in user.get("roles", [])]
+
+            if requested_role not in actual_roles:
+                logger.warning(
+                    f"[LOGIN] Role mismatch for {creds.email}. "
+                    f"Requested: {requested_role}, Allowed: {actual_roles}"
+                )
+                raise HTTPException(status_code=403, detail="Invalid role for this user")
+
+            logger.info(f"[LOGIN] Role OK: {requested_role}")
+
+            # ---------------------- OTP GENERATE ----------------------
             otp = _generate_otp()
             expiry = int(time.time()) + OTP_EXPIRY_SECONDS
-            users_collection.update_one({"_id": user["_id"]}, {"$set": {"otp": otp, "otp_expiry": expiry}})
 
+            users_collection.update_one(
+                {"_id": user["_id"]},
+                {"$set": {"otp": otp, "otp_expiry": expiry}}
+            )
+
+            logger.info(f"[LOGIN] OTP generated for {creds.email} exp={expiry}")
+
+            # ---------------------- SEND OTP ----------------------
             if verify_otp_template and _send_email:
                 html = verify_otp_template(name=user.get("full_name", user["email"]), otp=otp)
                 await _send_email(user["email"], "Your Login OTP", html)
+                logger.info(f"[LOGIN] OTP email sent to {creds.email}")
             else:
-                logger.info(f"Login OTP for {user['email']}: {otp}")
+                logger.info(f"[LOGIN] OTP in logs for {creds.email}: {otp}")
 
             return {"message": "OTP sent to email"}
 
         except HTTPException:
             raise
         except Exception as e:
-            logger.exception("Error in login")
-            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal server error during login")
+            logger.exception(f"[LOGIN] Unexpected login error for {creds.email}: {e}")
+            raise HTTPException(status_code=500, detail="Internal server error during login")
+        
 
     @staticmethod
     def verify_login(data: VerifyOtpDTO) -> Dict[str, str]:
@@ -150,13 +183,21 @@ class AuthService:
 
             if not stored_otp or stored_otp != data.otp or now > otp_expiry:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired OTP")
+            
+            requested_role = data.type.lower()
+            actual_roles = [r.lower() for r in user.get("roles", [])]
+
+            if requested_role not in actual_roles:
+               raise HTTPException(
+                  status_code=403,
+                  detail="Invalid role for this user"
+              )
 
             # Clear OTP
             users_collection.update_one({"_id": user["_id"]}, {"$unset": {"otp": "", "otp_expiry": ""}})
-            roles = user.get("roles", ["user"])
-
-            access = jwt_service.create_access_token(subject=str(user["_id"]), roles=roles, user_type="user", email=user["email"])
-            refresh = jwt_service.create_refresh_token(subject=str(user["_id"]), roles=roles, user_type="user")
+            
+            access = jwt_service.create_access_token(subject=str(user["_id"]), roles=[requested_role], user_type=requested_role, email=user["email"])
+            refresh = jwt_service.create_refresh_token(subject=str(user["_id"]), roles=[requested_role], user_type=requested_role)
 
             return {"access_token": access, "refresh_token": refresh}
 

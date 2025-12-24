@@ -116,7 +116,9 @@ async def upload_template(
         "template_id": template_id,
         "file_name": file.filename,
         "blob_name": blob_name,
-        "uploaded_at": int(time.time())
+        "uploaded_at": int(time.time()),
+        "status": "pending",     # 🆕 Added status field
+        # allowed values → pending, approved, rejected
     }
 
     users_collection.update_one(
@@ -134,15 +136,10 @@ async def upload_template(
 # ============================================================
 # LIST TEMPLATES
 # ============================================================
-
 @router.get("/list")
 def list_templates(request: Request, user=Depends(get_current_user)):
-    """
-    List templates for the authenticated user.
-    Token is automatically extracted via middleware + dependency.
-    """
 
-    user_id = request.state.user_id   # middleware already set this
+    user_id = request.state.user_id
 
     if not user_id or not ObjectId.is_valid(user_id):
         raise HTTPException(status_code=400, detail="Invalid user_id in token")
@@ -154,11 +151,22 @@ def list_templates(request: Request, user=Depends(get_current_user)):
 
     templates = user_doc.get("templates", []) if user_doc else []
 
+    # Format correctly
+    formatted = [
+        {
+            "template_id": t.get("template_id"),
+            "file_name": t.get("file_name"),
+            "blob_name": t.get("blob_name"),
+            "uploaded_at": t.get("uploaded_at"),
+            "status": t.get("status", "unknown")
+        }
+        for t in templates
+    ]
+
     return {
         "status": "success",
-        "templates": templates
+        "templates": formatted
     }
-
 # ============================================================
 # FETCH TEMPLATE CONTENT (ALWAYS TEXT)
 @router.get("/view/{template_id}")
