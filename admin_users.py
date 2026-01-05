@@ -75,31 +75,64 @@ def delete_user(
 ):
     """
     Admin-only: Permanently delete a user
+    - Admin users cannot be deleted
+    - Admin cannot delete himself
     """
     ensure_admin(user)
 
+    # ----------------------------
+    # Validate user_id
+    # ----------------------------
     if not ObjectId.is_valid(user_id):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid user ID"
         )
 
-    deleted = users_collection.find_one_and_delete(
-        {"_id": ObjectId(user_id)}
-    )
+    target_user_id = ObjectId(user_id)
 
-    if not deleted:
+    # ----------------------------
+    # Prevent admin deleting himself
+    # ----------------------------
+    if str(target_user_id) == user.get("sub"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin cannot delete himself"
+        )
+
+    # ----------------------------
+    # Fetch target user
+    # ----------------------------
+    target_user = users_collection.find_one({"_id": target_user_id})
+
+    if not target_user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found"
         )
+
+    # ----------------------------
+    # Prevent deleting admin users
+    # ----------------------------
+    target_roles = [r.lower() for r in target_user.get("roles", [])]
+
+    if "admin" in target_roles:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin users cannot be deleted"
+        )
+
+    # ----------------------------
+    # Delete user
+    # ----------------------------
+    users_collection.delete_one({"_id": target_user_id})
 
     return {
         "status": "success",
         "message": "User deleted successfully",
         "user": {
             "id": user_id,
-            "email": deleted.get("email"),
-            "name": deleted.get("full_name"),
+            "email": target_user.get("email"),
+            "name": target_user.get("full_name"),
         }
     }
