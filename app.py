@@ -13,11 +13,11 @@ from fastapi.responses import FileResponse
 from auth.routes import router as auth_router
 from auth.middleware import JWTMiddleware
 from chat_routes import router as chat_router
- 
+from models.user import UserModel
 import re
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
- 
+from bson import ObjectId
 # -------------------------- AZURE ---------------------------
 from azure.ai.projects import AIProjectClient
 from azure.identity import DefaultAzureCredential
@@ -25,9 +25,9 @@ from azure.ai.agents.models import ListSortOrder
 from history import get_or_create_thread, save_message
 import logging
 from templates_router import router as templates_router
- 
+from auth.db import users_collection
 from dotenv import load_dotenv
- 
+from admin_users import router as admin_users_router
  
 # -------------------------------------------------
 # ENV & LOGGER
@@ -60,7 +60,7 @@ app.add_middleware(JWTMiddleware)
 app.include_router(auth_router)
 app.include_router(chat_router)
 app.include_router(templates_router)
- 
+app.include_router(admin_users_router)
  
  
 # ================================================================
@@ -147,106 +147,119 @@ async def query_endpoint(
     user_file: Optional[UploadFile] = File(None)
 ):
     logger.info("📩 /query endpoint hit")
- 
-    # ----------------------------
-    # 1. Get user ID from JWT
-    # ----------------------------
-    user = getattr(request.state, "user", None)
-    if not user:
-        raise HTTPException(status_code=401, detail="Unauthorized")
- 
-    user_id = user.get("sub")
+
+    user_id = request.state.user_id
     if not user_id:
-        raise HTTPException(status_code=401, detail="Invalid token")
- 
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
     # ----------------------------
-    # 2. Extract file content
+    # 2. Extract upload file text (optional)
     # ----------------------------
     extra_context = ""
- 
+
     if user_file:
-        with tempfile.NamedTemporaryFile(
-            delete=False,
-            suffix=os.path.splitext(user_file.filename)[1]
-        ) as tmp:
-            content = await user_file.read()
-            tmp.write(content)
+        with tempfile.NamedTemporaryFile(delete=False,
+                                         suffix=os.path.splitext(user_file.filename)[1]) as tmp:
+            tmp.write(await user_file.read())
             tmp_path = tmp.name
- 
+
         try:
             file_text = extract_text(tmp_path, user_file.filename)
-            extra_context = f"\n\nUser-provided document context:\n{file_text[:3000]}"
+            extra_context = f"\n\nUser provided document context:\n{file_text[:3000]}"
         finally:
             os.remove(tmp_path)
- 
+
     user_prompt = question + extra_context
- 
+
     # ----------------------------
-    # 3. Azure thread management
+    # 3. Azure Thread
     # ----------------------------
     if thread_id:
         thread = project_client.agents.threads.get(thread_id=thread_id)
     else:
         thread = project_client.agents.threads.create()
- 
     thread_id = thread.id
- 
+
     # ----------------------------
-    # 4. Store thread + user message
+    # 4. Save user message
     # ----------------------------
     await get_or_create_thread(thread_id, user_id, question)
- 
     await save_message(
         thread_id=thread_id,
         user_id=user_id,
         sender="user",
         message=question
     )
- 
+
     # ----------------------------
-    # 5. Send message to Azure Agent
+    # 5. Send Azure request
     # ----------------------------
     project_client.agents.messages.create(
         thread_id=thread_id,
         role="user",
         content=user_prompt
     )
- 
+
     run = project_client.agents.runs.create_and_process(
         thread_id=thread_id,
         agent_id=legal_agent.id
     )
- 
+
+    # ----------------------------
+    # 6. Token Usage Tracking
+    # ----------------------------
+    usage = run.usage or {}
+    prompt_tokens = usage.get("prompt_tokens", 0)
+    completion_tokens = usage.get("completion_tokens", 0)
+    total_tokens = usage.get("total_tokens", prompt_tokens + completion_tokens)
+
+    logger.info(f"[TOKEN USAGE] prompt={prompt_tokens}, completion={completion_tokens}, total={total_tokens}")
+
+    # Update user's total token usage
+    try:
+        users_collection.update_one(
+            {"_id": ObjectId(user_id)},
+            {
+                "$inc": {
+                    "token_usage.prompt_tokens": prompt_tokens,
+                    "token_usage.completion_tokens": completion_tokens,
+                    "token_usage.total_tokens": total_tokens
+                }
+            }
+        )
+    except Exception as e:
+        logger.error(f"Failed to save token usage: {e}")
+
     if run.status == "failed":
         raise HTTPException(status_code=500, detail="Agent run failed")
- 
+
     # ----------------------------
-    # 6. Read agent reply
+    # 7. Read agent's message
     # ----------------------------
     messages = project_client.agents.messages.list(
         thread_id=thread_id,
         order=ListSortOrder.ASCENDING
     )
-   
+
     reply_text = ""
     pdf_files = []
- 
+
     for msg in messages:
         if msg.run_id == run.id and getattr(msg, "text_messages", None):
             reply_text = msg.text_messages[-1].text.value.strip()
-            print("botResponse:::::", reply_text)
- 
+            break
+
     # ----------------------------
-    # 7. Optional PDF detection
+    # 8. Detect Optional PDF
     # ----------------------------
     pdf_content = extract_pdf_block(reply_text)
     if pdf_content:
         pdf_path = f"generated_{thread_id}.pdf"
         create_pdf_from_text(pdf_content, pdf_path)
         pdf_files.append(f"download/{pdf_path}")
- 
+
     # ----------------------------
-    # 8. Save agent response
+    # 9. Save agent reply
     # ----------------------------
     await save_message(
         thread_id=thread_id,
@@ -254,22 +267,22 @@ async def query_endpoint(
         sender="agent",
         message=reply_text
     )
- 
+
     clean_text = re.sub(
         r"\[PDF_DOCUMENT\](.*?)\[/PDF_DOCUMENT\]",
         "",
         reply_text,
         flags=re.DOTALL
     ).strip()
- 
-    # ----------------------------
-    # 9. Final response
-    # ----------------------------
+
     return {
         "answer": clean_text,
         "pdf_files": pdf_files,
         "thread_id": thread_id,
-        "status": "success"
+        "status": "success",
+        "token_usage": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens
+        }
     }
- 
- 

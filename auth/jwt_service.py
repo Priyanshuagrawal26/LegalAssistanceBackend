@@ -21,7 +21,7 @@ REFRESH_EXPIRES = _to_int_env("REFRESH_TOKEN_EXPIRES", 7 * 24 * 3600)  # default
 SECRET_KEY = os.getenv("SECRET_KEY", "please-change-me")
 
 class JWTService:
-    def create_access_token(self, subject: str, roles: str, user_type: str, email: str) -> str:
+    def create_access_token(self, subject: str, roles: List[str], user_type: str, email: str) -> str:
         now = int(time.time())
         payload: Dict[str, Any] = {
             "sub": subject,

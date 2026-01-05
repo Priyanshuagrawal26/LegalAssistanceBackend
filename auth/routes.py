@@ -31,14 +31,23 @@ async def login(data: LoginDTO):
     return result
 
 
-
 @router.post("/login/verify", response_model=LoginResponseDTO)
 async def verify_login(data: VerifyOtpDTO, response: Response):
     tokens = AuthService.verify_login(data)
-    response.set_cookie("refreshToken", tokens["refresh_token"], httponly=True, secure=True, samesite="none", path="/")
-    print("Login verified for:")
-    return LoginResponseDTO(access_token=tokens["access_token"],)
 
+    # Set refresh cookie
+    response.set_cookie(
+        key="refreshToken",
+        value=tokens["refresh_token"],
+        httponly=True,
+        secure=True,
+        samesite="none",
+        path="/"
+    )
+
+    return LoginResponseDTO(
+        access_token=tokens["access_token"]
+    )
 
 @router.post("/login/resend-otp", status_code=202)
 async def resend_otp(payload: ResendOtpDTO):
