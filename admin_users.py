@@ -136,3 +136,73 @@ def delete_user(
             "name": target_user.get("full_name"),
         }
     }
+
+@router.get("/dashboard/stats")
+def admin_dashboard_stats(user=Depends(get_current_user)):
+    """
+    Admin dashboard statistics:
+    - total users
+    - total templates
+    - approved templates
+    - pending templates
+    - rejected templates
+    """
+    ensure_admin(user)
+
+    try:
+        # ----------------------------
+        # TOTAL USERS
+        # ----------------------------
+        total_users = users_collection.count_documents({})
+
+        # ----------------------------
+        # AGGREGATE TEMPLATE STATS
+        # ----------------------------
+        pipeline = [
+            {"$unwind": {"path": "$templates", "preserveNullAndEmptyArrays": False}},
+            {
+                "$group": {
+                    "_id": "$templates.status",
+                    "count": {"$sum": 1}
+                }
+            }
+        ]
+
+        result = list(users_collection.aggregate(pipeline))
+
+        total_templates = 0
+        approved = 0
+        pending = 0
+        rejected = 0
+
+        for r in result:
+            status_key = (r["_id"] or "").lower()
+            count = r["count"]
+
+            total_templates += count
+
+            if status_key == "approved":
+                approved = count
+            elif status_key == "pending":
+                pending = count
+            elif status_key == "rejected":
+                rejected = count
+
+        return {
+            "status": "success",
+            "data": {
+                "users": total_users,
+                "templates": {
+                    "total": total_templates,
+                    "approved": approved,
+                    "pending": pending,
+                    "rejected": rejected
+                }
+            }
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to load admin dashboard stats"
+        )
