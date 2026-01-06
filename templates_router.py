@@ -4,6 +4,7 @@ import tempfile
 import re
 import logging
 import fitz
+from fastapi import Query
 from datetime import datetime, timedelta
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Query
 from fastapi.responses import PlainTextResponse
@@ -325,116 +326,84 @@ def normalize_pdf_html(html: str) -> str:
     html = re.sub(r'style="[^"]*"', '', html)
     html = re.sub(r'<span[^>]*>', '<span>', html)
     return html
+
 @router.get("/view/{template_id}")
 def view_template(
     template_id: str,
     request: Request,
+    edited_by_user_id: str | None = Query(default=None),
     user=Depends(get_current_user)
 ):
     logger.info(f"[VIEW] Fetching template: {template_id}")
 
-    user_id = request.state.user_id
+    requester_id = request.state.user_id
     roles = request.state.roles or []
 
-    if not user_id:
+    if not requester_id or not ObjectId.is_valid(requester_id):
         raise HTTPException(status_code=401, detail="User not authenticated")
 
     # =====================================================
-    # 0. USER EDITED VERSION (HIGHEST PRIORITY)
+    # 🔥 DECIDE WHOSE EDITED VERSION TO LOAD
     # =====================================================
-    if ObjectId.is_valid(user_id):
-        edited_doc = users_collection.find_one(
-            {"_id": ObjectId(user_id), "templates.template_id": template_id},
-            {"templates.$": 1}
+    target_user_id = (
+        edited_by_user_id
+        if "admin" in roles and edited_by_user_id and ObjectId.is_valid(edited_by_user_id)
+        else requester_id
+    )
+
+    # =====================================================
+    # 1️⃣ CHECK EDITED HTML (ABSOLUTE PRIORITY)
+    # =====================================================
+    edited_user = users_collection.find_one(
+        {"_id": ObjectId(target_user_id)},
+        {"templates": 1}
+    )
+
+    if edited_user:
+        edited_template = next(
+            (
+                t for t in edited_user.get("templates", [])
+                if str(t.get("template_id")) == str(template_id)
+                and t.get("edited_blob")
+            ),
+            None
         )
 
-        if edited_doc and edited_doc.get("templates"):
-            user_template = edited_doc["templates"][0]
-
-            if "edited_blob" in user_template:
-                logger.info("[VIEW] Serving USER EDITED version")
-
-                edited_blob_client = container_client.get_blob_client(
-                    user_template["edited_blob"]
-                )
-
-                edited_html = edited_blob_client.download_blob().readall().decode("utf-8")
-
-                return {
-                    "template_id": template_id,
-                    "file_name": user_template["file_name"],
-                    "content": edited_html,
-                    "edited": True
-                }
-
-    template = None
-
-    # =====================================================
-    # 1. ADMIN → GLOBAL ACCESS
-    # =====================================================
-    if "admin" in roles:
-        logger.info("[VIEW] ADMIN MODE: global template search")
-
-        pipeline = [
-            {"$unwind": "$templates"},
-            {"$match": {"templates.template_id": template_id}},
-            {"$project": {"_id": 0, "template": "$templates"}}
-        ]
-
-        result = list(users_collection.aggregate(pipeline))
-        if not result:
-            raise HTTPException(status_code=404, detail="Template not found")
-
-        template = result[0]["template"]
-
-    # =====================================================
-    # 2. USER → OWN TEMPLATE
-    # =====================================================
-    else:
-        if not ObjectId.is_valid(user_id):
-            raise HTTPException(status_code=400, detail="Invalid user_id")
-
-        user_doc = users_collection.find_one(
-            {"_id": ObjectId(user_id)},
-            {"templates": 1}
-        )
-
-        if user_doc:
-            template = next(
-                (t for t in user_doc.get("templates", [])
-                 if t.get("template_id") == template_id),
-                None
+        if edited_template:
+            logger.info(
+                f"[VIEW] Serving EDITED HTML | template={template_id} | user={target_user_id}"
             )
 
-        # =====================================================
-        # 3. USER → ADMIN APPROVED TEMPLATE
-        # =====================================================
-        if not template:
-            logger.info("[VIEW] USER MODE: checking admin-approved templates")
+            blob = container_client.get_blob_client(
+                edited_template["edited_blob"]
+            )
+            html = blob.download_blob().readall().decode("utf-8")
 
-            pipeline = [
-                {"$match": {"roles": {"$in": ["admin"]}}},
-                {"$unwind": "$templates"},
-                {
-                    "$match": {
-                        "templates.template_id": template_id,
-                        "templates.status": "approved"
-                    }
-                },
-                {"$project": {"_id": 0, "template": "$templates"}}
-            ]
-
-            result = list(users_collection.aggregate(pipeline))
-            if not result:
-                raise HTTPException(status_code=404, detail="Template not found")
-
-            template = result[0]["template"]
+            return {
+                "template_id": template_id,
+                "file_name": edited_template["file_name"],
+                "content": html,
+                "edited": True,
+                "edited_by": target_user_id
+            }
 
     # =====================================================
-    # 4. FETCH ORIGINAL FILE CONTENT
+    # 2️⃣ FALLBACK → ORIGINAL TEMPLATE
     # =====================================================
-    blob_client = container_client.get_blob_client(template["blob_name"])
-    file_bytes = blob_client.download_blob().readall()
+    pipeline = [
+        {"$unwind": "$templates"},
+        {"$match": {"templates.template_id": template_id}},
+        {"$project": {"_id": 0, "template": "$templates"}}
+    ]
+
+    result = list(users_collection.aggregate(pipeline))
+    if not result:
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    template = result[0]["template"]
+
+    blob = container_client.get_blob_client(template["blob_name"])
+    file_bytes = blob.download_blob().readall()
 
     file_name = template["file_name"]
     ext = file_name.rsplit(".", 1)[-1].lower()
@@ -463,10 +432,7 @@ def view_template(
         content = normalize_pdf_html(raw_html)
 
     else:
-        content = "Unsupported file type"
-
-    if not content.strip():
-        content = "<p>No extractable content found.</p>"
+        content = "<p>Unsupported file type</p>"
 
     return {
         "template_id": template_id,
@@ -474,6 +440,7 @@ def view_template(
         "content": content,
         "edited": False
     }
+
 
 # ============================================================
 # DELETE TEMPLATE
