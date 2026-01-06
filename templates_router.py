@@ -252,32 +252,70 @@ async def upload_template(
 @router.get("/list")
 def list_templates(request: Request, user=Depends(get_current_user)):
     user_id = request.state.user_id
- 
+
     if not user_id or not ObjectId.is_valid(user_id):
         raise HTTPException(status_code=400, detail="Invalid user_id in token")
- 
+
+    # -------------------------------------------------
+    # 1. Fetch USER's own templates
+    # -------------------------------------------------
     user_doc = users_collection.find_one(
         {"_id": ObjectId(user_id)},
         {"templates": 1, "_id": 0}
     )
- 
-    templates = user_doc.get("templates", []) if user_doc else []
- 
-    formatted = [
+
+    user_templates = user_doc.get("templates", []) if user_doc else []
+
+    formatted_user_templates = [
         {
             "template_id": t.get("template_id"),
             "file_name": t.get("file_name"),
             "blob_name": t.get("blob_name"),
             "uploaded_at": t.get("uploaded_at"),
-            "status": t.get("status", "unknown")
+            "status": t.get("status", "unknown"),
+            "source": "user"   # 👈 helpful for frontend (optional)
         }
-        for t in templates
+        for t in user_templates
     ]
- 
+
+    # -------------------------------------------------
+    # 2. Fetch ADMIN approved templates (GLOBAL)
+    # -------------------------------------------------
+    admin_cursor = users_collection.find(
+        {
+            "roles": {"$in": ["admin"]},
+            "templates.status": "approved"
+        },
+        {
+            "templates": 1,
+            "_id": 0
+        }
+    )
+
+    admin_templates = []
+
+    for admin_doc in admin_cursor:
+        for t in admin_doc.get("templates", []):
+            if t.get("status") == "approved":
+                admin_templates.append({
+                    "template_id": t.get("template_id"),
+                    "file_name": t.get("file_name"),
+                    "blob_name": t.get("blob_name"),
+                    "uploaded_at": t.get("uploaded_at"),
+                    "status": t.get("status"),
+                    "source": "admin"   # 👈 helpful for frontend (optional)
+                })
+
+    # -------------------------------------------------
+    # 3. Merge (admin + user)
+    # -------------------------------------------------
+    templates = admin_templates + formatted_user_templates
+
     return {
         "status": "success",
-        "templates": formatted
+        "templates": templates
     }
+
  
  
 # ============================================================
@@ -287,8 +325,6 @@ def normalize_pdf_html(html: str) -> str:
     html = re.sub(r'style="[^"]*"', '', html)
     html = re.sub(r'<span[^>]*>', '<span>', html)
     return html
- 
- 
 @router.get("/view/{template_id}")
 def view_template(
     template_id: str,
@@ -296,110 +332,149 @@ def view_template(
     user=Depends(get_current_user)
 ):
     logger.info(f"[VIEW] Fetching template: {template_id}")
- 
+
     user_id = request.state.user_id
     roles = request.state.roles or []
- 
+
     if not user_id:
         raise HTTPException(status_code=401, detail="User not authenticated")
- 
+
+    # =====================================================
+    # 0. USER EDITED VERSION (HIGHEST PRIORITY)
+    # =====================================================
+    if ObjectId.is_valid(user_id):
+        edited_doc = users_collection.find_one(
+            {"_id": ObjectId(user_id), "templates.template_id": template_id},
+            {"templates.$": 1}
+        )
+
+        if edited_doc and edited_doc.get("templates"):
+            user_template = edited_doc["templates"][0]
+
+            if "edited_blob" in user_template:
+                logger.info("[VIEW] Serving USER EDITED version")
+
+                edited_blob_client = container_client.get_blob_client(
+                    user_template["edited_blob"]
+                )
+
+                edited_html = edited_blob_client.download_blob().readall().decode("utf-8")
+
+                return {
+                    "template_id": template_id,
+                    "file_name": user_template["file_name"],
+                    "content": edited_html,
+                    "edited": True
+                }
+
+    template = None
+
+    # =====================================================
+    # 1. ADMIN → GLOBAL ACCESS
+    # =====================================================
     if "admin" in roles:
-        logger.info(f"[VIEW] ADMIN MODE: searching template globally")
- 
+        logger.info("[VIEW] ADMIN MODE: global template search")
+
         pipeline = [
             {"$unwind": "$templates"},
             {"$match": {"templates.template_id": template_id}},
-            {
-                "$project": {
-                    "_id": 0,
-                    "template": "$templates"
-                }
-            }
+            {"$project": {"_id": 0, "template": "$templates"}}
         ]
- 
+
         result = list(users_collection.aggregate(pipeline))
- 
         if not result:
             raise HTTPException(status_code=404, detail="Template not found")
- 
+
         template = result[0]["template"]
+
+    # =====================================================
+    # 2. USER → OWN TEMPLATE
+    # =====================================================
     else:
         if not ObjectId.is_valid(user_id):
             raise HTTPException(status_code=400, detail="Invalid user_id")
- 
+
         user_doc = users_collection.find_one(
             {"_id": ObjectId(user_id)},
             {"templates": 1}
         )
- 
-        if not user_doc:
-            raise HTTPException(status_code=404, detail="User not found")
- 
-        template = next(
-            (t for t in user_doc.get("templates", []) if t["template_id"] == template_id),
-            None
-        )
- 
+
+        if user_doc:
+            template = next(
+                (t for t in user_doc.get("templates", [])
+                 if t.get("template_id") == template_id),
+                None
+            )
+
+        # =====================================================
+        # 3. USER → ADMIN APPROVED TEMPLATE
+        # =====================================================
         if not template:
-            raise HTTPException(status_code=404, detail="Template not found")
- 
-    if "edited_blob" in template:
-        try:
-            edited_blob_client = container_client.get_blob_client(template["edited_blob"])
-            edited_html = edited_blob_client.download_blob().readall().decode("utf-8")
- 
-            return {
-                "template_id": template_id,
-                "file_name": template["file_name"],
-                "content": edited_html,
-                "edited": True
-            }
-        except Exception:
-            pass
- 
+            logger.info("[VIEW] USER MODE: checking admin-approved templates")
+
+            pipeline = [
+                {"$match": {"roles": {"$in": ["admin"]}}},
+                {"$unwind": "$templates"},
+                {
+                    "$match": {
+                        "templates.template_id": template_id,
+                        "templates.status": "approved"
+                    }
+                },
+                {"$project": {"_id": 0, "template": "$templates"}}
+            ]
+
+            result = list(users_collection.aggregate(pipeline))
+            if not result:
+                raise HTTPException(status_code=404, detail="Template not found")
+
+            template = result[0]["template"]
+
+    # =====================================================
+    # 4. FETCH ORIGINAL FILE CONTENT
+    # =====================================================
     blob_client = container_client.get_blob_client(template["blob_name"])
     file_bytes = blob_client.download_blob().readall()
- 
+
     file_name = template["file_name"]
     ext = file_name.rsplit(".", 1)[-1].lower()
- 
+
     if ext == "txt":
         content = file_bytes.decode("utf-8", errors="ignore")
- 
+
     elif ext == "docx":
         with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp:
             tmp.write(file_bytes)
             path = tmp.name
- 
+
         doc = Document(path)
         content = "<br>".join(p.text for p in doc.paragraphs)
         os.remove(path)
- 
+
     elif ext == "pdf":
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
             tmp.write(file_bytes)
             pdf_path = tmp.name
- 
+
         doc = fitz.open(pdf_path)
         raw_html = "".join(page.get_text("html") for page in doc)
         doc.close()
         os.remove(pdf_path)
         content = normalize_pdf_html(raw_html)
- 
+
     else:
         content = "Unsupported file type"
- 
+
     if not content.strip():
         content = "<p>No extractable content found.</p>"
- 
+
     return {
         "template_id": template_id,
         "file_name": file_name,
         "content": content,
         "edited": False
     }
- 
- 
+
 # ============================================================
 # DELETE TEMPLATE
 # ============================================================
@@ -787,47 +862,61 @@ def approve_template(
         processed_by=admin_email,
         processed_at=now
     )
- 
+
 @router.post("/reject-template", response_model=TemplateActionResponse)
 def reject_template(
     user_id: str = Query(..., description="User ID"),
     template_id: str = Query(..., description="Template ID"),
-    reason: str = Query("Admin rejected", description="Rejection reason"),  # ✅ Default value, not required
     admin: dict = Depends(require_admin)
 ):
     admin_email = admin.get("email", "admin")
     now = int(time.time())
- 
-    logger.info(f"[REJECT] Admin {admin_email} rejecting template: user={user_id}, template={template_id}")
-    logger.info(f"[REJECT] Reason: {reason}")
- 
+
+    logger.info(
+        f"[REJECT] Admin {admin_email} rejecting template: "
+        f"user={user_id}, template={template_id}"
+    )
+
+    # ----------------------------
+    # Validate user_id
+    # ----------------------------
     if not ObjectId.is_valid(user_id):
         raise HTTPException(400, "Invalid user_id format")
- 
-    # ✅ Removed the reason length validation
-    # if len(reason.strip()) < 5:
-    #     raise HTTPException(400, "Rejection reason must be at least 5 characters")
- 
-    # Fetch user and template
+
+    # ----------------------------
+    # Fetch user
+    # ----------------------------
     user_doc = users_collection.find_one(
         {"_id": ObjectId(user_id)},
         {"templates": 1}
     )
- 
+
     if not user_doc:
         raise HTTPException(404, "User not found")
- 
+
     templates = user_doc.get("templates", [])
-    template = next((t for t in templates if t.get("template_id") == template_id), None)
- 
+    template = next(
+        (t for t in templates if t.get("template_id") == template_id),
+        None
+    )
+
     if not template:
         raise HTTPException(404, "Template not found")
- 
+
     current_status = template.get("status", "pending")
- 
+
+    # ----------------------------
+    # Status validation
+    # ----------------------------
     if current_status != "pending":
-        raise HTTPException(400, f"Template is already {current_status}. Cannot reject.")
- 
+        raise HTTPException(
+            400,
+            f"Template is already '{current_status}'. Cannot reject."
+        )
+
+    # ----------------------------
+    # UPDATE — ONLY ALLOWED FIELD
+    # ----------------------------
     update_result = users_collection.update_one(
         {
             "_id": ObjectId(user_id),
@@ -835,33 +924,26 @@ def reject_template(
         },
         {
             "$set": {
-                "templates.$.status": "rejected",
-                "templates.$.rejection_reason": reason.strip() if reason else "Admin rejected",  # ✅ Handle empty reason
-                "templates.$.reviewed_at": now,
-                "templates.$.reviewed_by": admin_email
-            },
-            "$inc": {
-                "templates_rejected": 1,
-                "templates_pending": -1
+                "templates.$.status": "rejected"
             }
         }
     )
- 
+
     if update_result.modified_count == 0:
         raise HTTPException(500, "Failed to update template status")
- 
-    logger.info(f"[REJECT] ❌ Template {template_id} rejected successfully by {admin_email}")
- 
+
+    logger.info(
+        f"[REJECT] ❌ Template {template_id} rejected by {admin_email}"
+    )
+
     return TemplateActionResponse(
         status="success",
         message="Template rejected",
         template_id=template_id,
         action="rejected",
-        reason=reason.strip() if reason else "Admin rejected",
         processed_by=admin_email,
         processed_at=now
     )
- 
  
 # ============================================================
 # DEBUG ENDPOINT - Check template data
