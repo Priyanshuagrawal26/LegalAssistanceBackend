@@ -6,13 +6,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import fitz as pymupdf
 import docx
+import json
 from auth.routes import router as auth_router
 from auth.middleware import JWTMiddleware
 from fastapi.responses import FileResponse
 # ---------------------- AUTH + SESSION ----------------------
 from auth.routes import router as auth_router
 from auth.middleware import JWTMiddleware
-from chat_routes import router as chat_router
+from routes.chat_routes import router as chat_router
 from models.user import UserModel
 import re
 from reportlab.lib.pagesizes import letter
@@ -22,13 +23,13 @@ from bson import ObjectId
 from azure.ai.projects import AIProjectClient
 from azure.identity import DefaultAzureCredential
 from azure.ai.agents.models import ListSortOrder
-from history import get_or_create_thread, save_message
+from services.history import get_or_create_thread, save_message
 import logging
-from templates_router import router as templates_router
+from routes.templates_router import router as templates_router
 from auth.db import users_collection
 from dotenv import load_dotenv
-from admin_users import router as admin_users_router
- 
+from routes.admin_users import router as admin_users_router
+from tools.serpapi import serpapi_search
 # -------------------------------------------------
 # ENV & LOGGER
 # -------------------------------------------------
@@ -61,19 +62,32 @@ app.include_router(auth_router)
 app.include_router(chat_router)
 app.include_router(templates_router)
 app.include_router(admin_users_router)
- 
- 
+
+project_client = None
+legal_agent = None
+
 # ================================================================
 #                        Azure Setup
 # ================================================================
-project_client = AIProjectClient(
-    endpoint=os.getenv("AGENT_ENDPOINT"),
-    credential=DefaultAzureCredential()
-)
- 
-# Legal Template Generator Agent
- 
-legal_agent = project_client.agents.get_agent(agent_id=os.getenv("LEGAL_AGENT_ID"))
+@app.on_event("startup")
+async def startup_event():
+    global project_client, legal_agent
+
+    logging.getLogger("azure").setLevel(logging.WARNING)
+    logging.getLogger("azure.identity").setLevel(logging.WARNING)
+    logging.getLogger("azure.core").setLevel(logging.WARNING)
+
+    project_client = AIProjectClient(
+        endpoint=os.getenv("AGENT_ENDPOINT"),
+        credential=DefaultAzureCredential()
+    )
+
+    legal_agent = project_client.agents.get_agent(
+        agent_id=os.getenv("LEGAL_AGENT_ID")
+    )
+
+    logger.info("✅ Azure AI Agent initialized at startup")
+
  
  
 # ================================================================
@@ -200,10 +214,43 @@ async def query_endpoint(
         content=user_prompt
     )
 
-    run = project_client.agents.runs.create_and_process(
-        thread_id=thread_id,
-        agent_id=legal_agent.id
+    run = project_client.agents.runs.create(
+       thread_id=thread_id,
+       agent_id=legal_agent.id
     )
+  
+    while run.status in ["queued", "in_progress", "requires_action"]:
+
+     if run.status == "requires_action":
+        tool_outputs = []
+
+        for tool_call in run.required_action.submit_tool_outputs.tool_calls:
+
+            function_name = tool_call.function.name
+            arguments = json.loads(tool_call.function.arguments)
+
+            logger.info(f"🛠 Executing tool: {function_name} | args={arguments}")
+
+            if function_name == "serpapi_search":
+                output = serpapi_search(**arguments)
+
+                tool_outputs.append({
+                    "tool_call_id": tool_call.id,
+                     "output": json.dumps(output, ensure_ascii=False)
+                })
+
+        run = project_client.agents.runs.submit_tool_outputs(
+            thread_id=thread_id,
+            run_id=run.id,
+            tool_outputs=tool_outputs
+        )
+
+     else:
+        run = project_client.agents.runs.get(
+            thread_id=thread_id,
+            run_id=run.id
+        )
+    
 
     # ----------------------------
     # 6. Token Usage Tracking

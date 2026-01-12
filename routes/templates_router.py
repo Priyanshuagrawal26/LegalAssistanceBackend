@@ -8,7 +8,7 @@ from fastapi import Query
 from datetime import datetime, timedelta
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Query
 from fastapi.responses import PlainTextResponse
-from template_models import TemplateActionResponse
+from models.template_models import TemplateActionResponse
 from dotenv import load_dotenv
 import io
 from bson import ObjectId
@@ -73,11 +73,6 @@ if not all([BLOB_CONN_STR, MONGO_URI, DB_NAME, FORM_ENDPOINT, FORM_KEY]):
 # ============================================================
 blob_service = BlobServiceClient.from_connection_string(BLOB_CONN_STR)
 container_client = blob_service.get_container_client(CONTAINER_NAME)
- 
-try:
-    container_client.create_container()
-except Exception:
-    pass
  
 form_client = DocumentAnalysisClient(
     endpoint=FORM_ENDPOINT,
@@ -536,7 +531,7 @@ async def get_user_token_usage(request: Request, user=Depends(get_current_user))
             "used": token_usage.get("total_tokens", 0),
             "prompt_tokens": token_usage.get("prompt_tokens", 0),
             "completion_tokens": token_usage.get("completion_tokens", 0),
-            "limit": 100000,
+            "limit": 1000000,
             "last_updated": datetime.utcnow().isoformat()
         }
  

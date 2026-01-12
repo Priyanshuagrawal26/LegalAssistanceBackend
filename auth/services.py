@@ -15,8 +15,8 @@ from .jwt_service import JWTService
 from .db import users_collection, PyObjectId
 
 # Adjust import paths for your project
-from utils1.templates import verify_otp_template
-from utils1.email_utils import _send_email
+from services.templates import verify_otp_template
+from services.email_utils import _send_email
 from models.user import UserModel, TokenUsage, UserTemplate
 
 # Logging Configuration
