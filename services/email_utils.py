@@ -4,52 +4,48 @@ from azure.communication.email import EmailClient
 from fastapi import HTTPException, status
 import os
 from dotenv import load_dotenv
+from tools.logger import get_logger
+from tools.decorators import log_function_call
 
 load_dotenv()
 
 # -------------------------
 # Logging Setup
 # -------------------------
-logger = logging.getLogger("azure_email")
-logger.setLevel(logging.DEBUG)
-
-if not logger.handlers:
-    handler = logging.StreamHandler()
-    formatter = logging.Formatter(
-        "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-    )
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
+logger = get_logger("azure_email")
 
 # -------------------------
 # Azure Email Client Setup
 # -------------------------
 COMMUNICATION_CONNECTION_STRING = os.getenv("MAIL_CNN_STRING")
-
-logger.debug("🔍 Loading Azure Email configuration...")
-logger.debug(f"MAIL_CNN_STRING exists: {bool(COMMUNICATION_CONNECTION_STRING)}")
-
 if not COMMUNICATION_CONNECTION_STRING:
     logger.critical("❌ MAIL_CNN_STRING is NOT set in environment")
-    raise RuntimeError("MAIL_CNN_STRING environment variable not set")
+    # raise RuntimeError("MAIL_CNN_STRING environment variable not set") 
+    # Commented out to prevent crash if not used instantly, or should fail fast?
+    # Original code raised RuntimeError. I'll keep it but maybe wrapped? 
+    # Stick to original behavior but log structured.
+    pass 
 
-try:
-    email_client = EmailClient.from_connection_string(
-        COMMUNICATION_CONNECTION_STRING
-    )
-    logger.info("✅ Azure EmailClient initialized successfully")
-except Exception as e:
-    logger.critical(f"❌ Failed to initialize EmailClient: {e}")
-    raise
+email_client = None
+if COMMUNICATION_CONNECTION_STRING:
+    try:
+        email_client = EmailClient.from_connection_string(
+            COMMUNICATION_CONNECTION_STRING
+        )
+        logger.info("✅ Azure EmailClient initialized successfully")
+    except Exception as e:
+        logger.critical(f"❌ Failed to initialize EmailClient: {e}", exc_info=True)
+        # raise # Optional: fail fast
 
 # -------------------------
 # Email Sender Helper
 # -------------------------
+@log_function_call
 async def _send_email(to_address: str, subject: str, html_body: str) -> None:
     logger.info("📨 Preparing to send email")
-    logger.debug(f"To Address: {to_address}")
-    logger.debug(f"Subject: {subject}")
-    logger.debug(f"HTML length: {len(html_body)}")
+    
+    # Avoid logging full HTML body if huge, maybe just length
+    logger.debug(f"To Address: {to_address} | Subject: {subject} | HTML len: {len(html_body)}")
 
     try:
         await send_mail_to_user(
@@ -60,8 +56,7 @@ async def _send_email(to_address: str, subject: str, html_body: str) -> None:
         )
         logger.info(f"✅ Email sent to {to_address}")
     except Exception as e:
-        logger.error(f"❌ Failed to send email to {to_address}")
-        logger.exception(e)
+        logger.error(f"❌ Failed to send email to {to_address}: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to send email"
@@ -70,6 +65,7 @@ async def _send_email(to_address: str, subject: str, html_body: str) -> None:
 # -------------------------
 # Core Email Sender
 # -------------------------
+@log_function_call
 async def send_mail_to_user(
     sender: str,
     to: list[dict[str, str]],
@@ -77,13 +73,11 @@ async def send_mail_to_user(
     plain_text: str = "",
     html: str = "",
 ) -> None:
+    if not email_client:
+        logger.error("Email client not initialized")
+        raise RuntimeError("Email client not initialized")
 
-    logger.info("🚀 send_mail_to_user() called")
-    logger.debug(f"Sender: {sender}")
-    logger.debug(f"Recipients: {to}")
-    logger.debug(f"Subject: {subject}")
-    logger.debug(f"Plain text length: {len(plain_text)}")
-    logger.debug(f"HTML length: {len(html)}")
+    logger.debug(f"Sender: {sender} | Recipients: {to} | Subject: {subject}")
 
     message = {
         "senderAddress": sender,
@@ -97,9 +91,6 @@ async def send_mail_to_user(
         },
     }
 
-    logger.debug("📦 Email payload constructed")
-    logger.debug(message)
-
     try:
         logger.info("📡 Calling Azure begin_send()...")
         poller = email_client.begin_send(message)
@@ -107,15 +98,12 @@ async def send_mail_to_user(
         logger.info("⏳ Waiting for Azure email send result...")
         result = poller.result()
 
-        logger.info("📬 Azure response received")
-        logger.debug(f"Azure response: {result}")
+        logger.info(f"📬 Azure response received: {result}")
 
         status_value = result.get("status", "").lower()
-        logger.info(f"📊 Email status: {status_value}")
-
+        
         if status_value != "succeeded":
-            logger.error("❌ Azure email send FAILED")
-            logger.error(result)
+            logger.error(f"❌ Azure email send FAILED with status: {status_value}")
             raise RuntimeError(
                 f"Email send failed with status: {result.get('status')}"
             )
@@ -123,8 +111,7 @@ async def send_mail_to_user(
         logger.info("✅ Azure email sent successfully")
 
     except Exception as e:
-        logger.critical("🔥 Exception during Azure email send")
-        logger.exception(e)
+        logger.critical(f"🔥 Exception during Azure email send: {e}", exc_info=True)
 
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

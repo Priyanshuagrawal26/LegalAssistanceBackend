@@ -25,73 +25,68 @@ from auth.db import users_collection
 import time
 from fastapi import Depends, Request
 from auth.middleware import get_current_user, require_admin
- 
+from tools.logger import get_logger, user_id_ctx
+from tools.decorators import log_function_call
+
 # ============================================================
 # ENV + LOGGER
 # ============================================================
 load_dotenv()
- 
-logger = logging.getLogger("templates")
-logger.setLevel(logging.DEBUG)  # Changed to DEBUG for more info
- 
-# Add console handler if not present
-if not logger.handlers:
-    handler = logging.StreamHandler()
-    handler.setLevel(logging.DEBUG)
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
- 
+
+logger = get_logger("templates")
+
 router = APIRouter(prefix="/templates", tags=["Templates"])
- 
+
 project_client = AIProjectClient(
     endpoint=os.getenv("AGENT_ENDPOINT"),
     credential=DefaultAzureCredential(),
 )
- 
+
 AGENT_ID = os.getenv("LEGAL_AGENT_ID")
 VECTOR_STORE_ID = os.getenv("LEGAL_KB_ID")
- 
+
 # ============================================================
 # ENV CONFIG
 # ============================================================
 BLOB_CONN_STR = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
 CONTAINER_NAME = os.getenv("AZURE_BLOB_CONTAINER_NAME", "templates")
- 
+
 MONGO_URI = os.getenv("MONGO_URI")
 DB_NAME = os.getenv("MONGO_DB_NAME")
- 
+
 FORM_ENDPOINT = os.getenv("AZURE_FORM_RECOGNIZER_ENDPOINT")
 FORM_KEY = os.getenv("AZURE_FORM_RECOGNIZER_KEY")
- 
+
 if not all([BLOB_CONN_STR, MONGO_URI, DB_NAME, FORM_ENDPOINT, FORM_KEY]):
+    logger.critical("Missing one or more required environment variables for templates")
     raise RuntimeError("Missing one or more required environment variables")
- 
- 
+
+
 # ============================================================
 # AZURE CLIENTS
 # ============================================================
 blob_service = BlobServiceClient.from_connection_string(BLOB_CONN_STR)
 container_client = blob_service.get_container_client(CONTAINER_NAME)
- 
+
 form_client = DocumentAnalysisClient(
     endpoint=FORM_ENDPOINT,
     credential=AzureKeyCredential(FORM_KEY)
 )
- 
+
 client = AIProjectClient(
     endpoint=os.getenv("AGENT_ENDPOINT"),
     credential=DefaultAzureCredential(),
 )
- 
+
 VECTOR_STORE_ID = os.getenv("LEGAL_KB_ID", "constitution_vectorstore")
- 
- 
+
+
+@log_function_call
 def upload_pdf_to_agent(file_bytes: bytes, filename: str) -> dict:
     """
     Upload PDF bytes to Azure AI Agent and add to vector store.
    
-    Args:
+    function_arg:
         file_bytes: The raw file content as bytes
         filename: The original filename (e.g., "Rent Deed.pdf")
    
@@ -101,38 +96,38 @@ def upload_pdf_to_agent(file_bytes: bytes, filename: str) -> dict:
     try:
         logger.info(f"📤 Step 1: Uploading {filename} to Files API...")
         logger.info(f"   File size: {len(file_bytes)} bytes")
- 
+
         # ⭐ KEY FIX: Convert bytes to file-like object with a name
         file_stream = io.BytesIO(file_bytes)
         file_stream.name = filename  # SDK needs this for the filename!
- 
+
         # Upload file to Azure AI
         uploaded_file = client.agents.files.upload_and_poll(
             file=file_stream,
             purpose="assistants"
         )
- 
+
         file_id = uploaded_file.id
         logger.info(f"✅ File uploaded! file_id={file_id}")
- 
+
         # ⭐ Step 2: Add to vector store (YOUR SCRIPT HAD THIS!)
         logger.info(f"📤 Step 2: Adding file to vector store '{VECTOR_STORE_ID}'...")
- 
+
         batch = client.agents.vector_store_file_batches.create_and_poll(
             vector_store_id=VECTOR_STORE_ID,
             file_ids=[file_id]
         )
- 
+
         logger.info(f"✅ File added to vector store successfully!")
         logger.info(f"   Batch status: {batch.status if hasattr(batch, 'status') else 'completed'}")
- 
+
         return {
             "success": True,
             "file_id": file_id,
             "vector_store_id": VECTOR_STORE_ID,
             "message": "File uploaded and added to vector store"
         }
- 
+
     except Exception as e:
         logger.error(f"❌ Upload failed: {e}", exc_info=True)
         return {
@@ -143,6 +138,7 @@ def upload_pdf_to_agent(file_bytes: bytes, filename: str) -> dict:
 # ============================================================
 # OCR HELPER
 # ============================================================
+@log_function_call
 def ocr_extract(file_bytes: bytes) -> str:
     poller = form_client.begin_analyze_document(
         model_id="prebuilt-read",
@@ -150,73 +146,79 @@ def ocr_extract(file_bytes: bytes) -> str:
     )
     result = poller.result()
     return result.content.strip() if result and result.content else ""
- 
- 
+
+
 @router.get("/downloads/recent")
+@log_function_call
 async def get_recent_downloads(request: Request, user=Depends(get_current_user)):
     user_id = request.state.user_id
- 
+    user_id_ctx.set(str(user_id))
+
     user_doc = users_collection.find_one(
         {"_id": ObjectId(user_id)},
         {"recent_downloads": 1, "_id": 0}
     )
- 
+
     return {
         "downloads": user_doc.get("recent_downloads", []) if user_doc else []
     }
- 
- 
+
+
 @router.post("/download/log")
+@log_function_call
 async def log_download(request: Request, data: dict, user=Depends(get_current_user)):
     user_id = request.state.user_id
- 
+    user_id_ctx.set(str(user_id))
+
     if not data.get("template_id") or not data.get("file_name"):
         raise HTTPException(status_code=400, detail="Missing template_id or file_name")
- 
+
     ist_timestamp = int((datetime.utcnow() + timedelta(hours=5, minutes=30)).timestamp())
- 
+
     entry = {
         "template_id": data["template_id"],
         "file_name": data["file_name"],
         "downloaded_at": ist_timestamp
     }
- 
+
     users_collection.update_one(
         {"_id": ObjectId(user_id)},
         {"$push": {"recent_downloads": {"$each": [entry], "$slice": -20}}}
     )
- 
+
     return {"message": "Download logged"}
- 
- 
+
+
 # ============================================================
 # UPLOAD TEMPLATE
 # ============================================================
 @router.post("/upload")
+@log_function_call
 async def upload_template(
     request: Request,
     file: UploadFile = File(...),
     user=Depends(get_current_user)
 ):
     user_id = request.state.user_id
- 
+    user_id_ctx.set(str(user_id))
+
     if not user_id or not ObjectId.is_valid(user_id):
         raise HTTPException(status_code=400, detail="Invalid user_id in token")
- 
+
     file_bytes = await file.read()
     if not file_bytes:
         raise HTTPException(status_code=400, detail="Empty file")
- 
+
     template_id = str(ObjectId())
     blob_name = f"{user_id}/{template_id}_{file.filename}"
- 
+
     logger.info(f"[UPLOAD] Uploading template: {blob_name}")
     logger.info(f"[UPLOAD] template_id={template_id}, file_name={file.filename}")
- 
+
     container_client.get_blob_client(blob_name).upload_blob(
         file_bytes, overwrite=True
     )
- 
+
     template = {
         "template_id": template_id,
         "file_name": file.filename,
@@ -224,30 +226,32 @@ async def upload_template(
         "uploaded_at": int(time.time()),
         "status": "pending",
     }
- 
+
     logger.info(f"[UPLOAD] Template document: {template}")
- 
+
     result = users_collection.update_one(
         {"_id": ObjectId(user_id)},
         {"$push": {"templates": template}},
         upsert=True
     )
- 
+
     logger.info(f"[UPLOAD] MongoDB update result: matched={result.matched_count}, modified={result.modified_count}")
- 
+
     return {
         "status": "success",
         "message": "Template uploaded",
         "template": template
     }
- 
- 
+
+
 # ============================================================
 # LIST TEMPLATES
 # ============================================================
 @router.get("/list")
+@log_function_call
 def list_templates(request: Request, user=Depends(get_current_user)):
     user_id = request.state.user_id
+    user_id_ctx.set(str(user_id))
 
     if not user_id or not ObjectId.is_valid(user_id):
         raise HTTPException(status_code=400, detail="Invalid user_id in token")
@@ -323,6 +327,7 @@ def normalize_pdf_html(html: str) -> str:
     return html
 
 @router.get("/view/{template_id}")
+@log_function_call
 def view_template(
     template_id: str,
     request: Request,
@@ -333,6 +338,7 @@ def view_template(
 
     requester_id = request.state.user_id
     roles = request.state.roles or []
+    user_id_ctx.set(str(requester_id))
 
     if not requester_id or not ObjectId.is_valid(requester_id):
         raise HTTPException(status_code=401, detail="User not authenticated")
@@ -441,47 +447,50 @@ def view_template(
 # DELETE TEMPLATE
 # ============================================================
 @router.delete("/{template_id}")
+@log_function_call
 def delete_template(
     template_id: str,
     request: Request,
     user=Depends(get_current_user)
 ):
     user_id = request.state.user_id
- 
+    user_id_ctx.set(str(user_id))
+
     if not user_id or not ObjectId.is_valid(user_id):
         raise HTTPException(status_code=400, detail="Invalid user_id in token")
- 
+
     user_doc = users_collection.find_one(
         {"_id": ObjectId(user_id)},
         {"templates": 1}
     )
- 
+
     if not user_doc:
         raise HTTPException(status_code=404, detail="User not found")
- 
+
     template = next(
         (t for t in user_doc.get("templates", []) if t["template_id"] == template_id),
         None
     )
- 
+
     if not template:
         raise HTTPException(status_code=404, detail="Template not found")
- 
+
     container_client.get_blob_client(template["blob_name"]).delete_blob()
- 
+
     users_collection.update_one(
         {"_id": ObjectId(user_id)},
         {"$pull": {"templates": {"template_id": template_id}}}
     )
- 
+
     return {
         "status": "success",
         "message": "Template deleted",
         "template_id": template_id
     }
- 
- 
+
+
 @router.post("/save/{template_id}")
+@log_function_call
 async def save_template(
     template_id: str,
     request: Request,
@@ -489,44 +498,47 @@ async def save_template(
     user=Depends(get_current_user)
 ):
     user_id = request.state.user_id
- 
+    user_id_ctx.set(str(user_id))
+
     if not user_id or not ObjectId.is_valid(user_id):
         raise HTTPException(status_code=400, detail="Invalid user_id")
- 
+
     edited_blob_name = f"{user_id}/{template_id}_edited.html"
- 
+
     blob_client = container_client.get_blob_client(edited_blob_name)
     blob_client.upload_blob(content.encode("utf-8"), overwrite=True)
- 
+
     users_collection.update_one(
         {"_id": ObjectId(user_id), "templates.template_id": template_id},
         {"$set": {"templates.$.edited_blob": edited_blob_name}}
     )
- 
+
     return {
         "status": "success",
         "message": "Template saved",
         "edited_blob": edited_blob_name
     }
- 
- 
+
+
 @router.get("/user/token-usage")
+@log_function_call
 async def get_user_token_usage(request: Request, user=Depends(get_current_user)):
     user_id = request.state.user_id
+    user_id_ctx.set(str(user_id))
     logger.info(f"[TOKEN][USER] Fetch request received | user_id={user_id}")
- 
+
     try:
         user_doc = users_collection.find_one(
             {"_id": ObjectId(user_id)},
             {"token_usage": 1, "_id": 0}
         )
- 
+
         if not user_doc:
             logger.warning(f"[TOKEN][USER] User not found | user_id={user_id}")
             raise HTTPException(status_code=404, detail="User not found")
- 
+
         token_usage = user_doc.get("token_usage", {})
- 
+
         response = {
             "used": token_usage.get("total_tokens", 0),
             "prompt_tokens": token_usage.get("prompt_tokens", 0),
@@ -534,15 +546,16 @@ async def get_user_token_usage(request: Request, user=Depends(get_current_user))
             "limit": 1000000,
             "last_updated": datetime.utcnow().isoformat()
         }
- 
+
         return response
- 
+
     except Exception as e:
         logger.error(f"[TOKEN][USER] Failed to fetch token usage | user_id={user_id}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to fetch token usage")
- 
- 
+
+
 @router.get("/admin/token-usage", dependencies=[Depends(require_admin)])
+@log_function_call
 async def get_admin_token_usage():
     pipeline = [
         {
@@ -563,9 +576,9 @@ async def get_admin_token_usage():
             }
         }
     ]
- 
+
     result = list(users_collection.aggregate(pipeline))
- 
+
     if not result:
         return {
             "total_tokens": 0,
@@ -573,20 +586,21 @@ async def get_admin_token_usage():
             "total_completion_tokens": 0,
             "active_users": 0
         }
- 
+
     data = result[0]
     data.pop("_id", None)
     return data
- 
- 
+
+
 @router.get("/admin/templates/all")
+@log_function_call
 def get_all_templates_admin(
     request: Request,
     admin: dict = Depends(require_admin)
 ):
     admin_email = admin.get("email", "admin")
     logger.info(f"[ADMIN][TEMPLATES] Fetch all templates | admin={admin_email}")
- 
+
     try:
         cursor = users_collection.find(
             {"templates": {"$exists": True, "$ne": []}},
@@ -596,14 +610,14 @@ def get_all_templates_admin(
                 "templates": 1
             }
         )
- 
+
         results = []
- 
+
         for user in cursor:
             user_id = str(user["_id"])
             user_email = user.get("email")
             user_name = user.get("full_name")
- 
+
             for t in user.get("templates", []):
                 # Log each template for debugging
                 logger.debug(f"[ADMIN][TEMPLATES] Template: {t}")
@@ -624,20 +638,20 @@ def get_all_templates_admin(
                     "file_name": t.get("file_name"),  # Also include file_name explicitly
                     "edited_blob": t.get("edited_blob"),
                 })
- 
+
         logger.info(f"[ADMIN][TEMPLATES] Total templates returned = {len(results)}")
- 
+
         return {
             "status": "success",
             "count": len(results),
             "templates": results
         }
- 
+
     except Exception as e:
         logger.error("[ADMIN][TEMPLATES] Failed to fetch templates", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to fetch templates")
- 
- 
+
+
 # ============================================================
 # HELPER: Find template across all users
 # ============================================================
@@ -662,9 +676,10 @@ def find_template_globally(template_id: str):
     if result:
         return result[0]["user_id"], result[0]["template"]
     return None, None
- 
- 
+
+
 @router.post("/approve-template", response_model=TemplateActionResponse)
+@log_function_call
 def approve_template(
     user_id: str = Query(..., description="User ID"),
     template_id: str = Query(..., description="Template ID"),
@@ -672,31 +687,31 @@ def approve_template(
 ):
     admin_email = admin.get("email", "admin")
     now = int(time.time())
- 
+
     logger.info(f"=" * 60)
     logger.info(f"[APPROVE] Starting approval process")
     logger.info(f"[APPROVE] user_id={user_id}")
     logger.info(f"[APPROVE] template_id={template_id}")
     logger.info(f"[APPROVE] admin={admin_email}")
- 
+
     # Validate ObjectId
     if not ObjectId.is_valid(user_id):
         logger.error(f"[APPROVE] Invalid user_id format: {user_id}")
         raise HTTPException(400, "Invalid user_id format")
- 
+
     # Fetch user document with all templates
     user_doc = users_collection.find_one(
         {"_id": ObjectId(user_id)},
         {"templates": 1, "email": 1}
     )
- 
+
     if not user_doc:
         logger.error(f"[APPROVE] User not found: {user_id}")
         raise HTTPException(404, "User not found")
- 
+
     logger.info(f"[APPROVE] User found: {user_doc.get('email', 'no-email')}")
     logger.info(f"[APPROVE] User has {len(user_doc.get('templates', []))} templates")
- 
+
     # Find the specific template
     templates = user_doc.get("templates", [])
     template = None
@@ -706,30 +721,30 @@ def approve_template(
         if t.get("template_id") == template_id:
             template = t
             break
- 
+
     if not template:
         logger.error(f"[APPROVE] Template not found: {template_id}")
         logger.error(f"[APPROVE] Available template_ids: {[t.get('template_id') for t in templates]}")
         raise HTTPException(404, "Template not found")
- 
+
     # Log template details
     logger.info(f"[APPROVE] Template found!")
     logger.info(f"[APPROVE] Template keys: {list(template.keys())}")
     logger.info(f"[APPROVE] Template data: {template}")
- 
+
     current_status = template.get("status", "pending")
     logger.info(f"[APPROVE] Current status: {current_status}")
- 
+
     if current_status != "pending":
         raise HTTPException(400, f"Template already {current_status}")
- 
+
     # Get blob_name and file_name with fallbacks
     blob_name = template.get("blob_name")
     filename = template.get("file_name")
- 
+
     logger.info(f"[APPROVE] blob_name={blob_name}")
     logger.info(f"[APPROVE] file_name={filename}")
- 
+
     if not blob_name or not filename:
         # Try to reconstruct blob_name if possible
         if filename and not blob_name:
@@ -740,7 +755,7 @@ def approve_template(
             # Try to extract filename from blob_name
             filename = blob_name.split("/")[-1].split("_", 1)[-1] if "/" in blob_name else blob_name
             logger.warning(f"[APPROVE] Extracted filename from blob_name: {filename}")
- 
+
         if not blob_name or not filename:
             logger.error(f"[APPROVE] Cannot proceed without blob_name and file_name")
             logger.error(f"[APPROVE] Template keys: {list(template.keys())}")
@@ -749,39 +764,39 @@ def approve_template(
                 f"Template is missing blob_name or file_name. "
                 f"Available fields: {list(template.keys())}"
             )
- 
+
     # Check if blob exists
     try:
         blob_client = container_client.get_blob_client(blob_name)
- 
+
         if not blob_client.exists():
             logger.error(f"[APPROVE] Blob does not exist: {blob_name}")
             raise HTTPException(404, f"Blob not found in storage: {blob_name}")
- 
+
         file_bytes = blob_client.download_blob().readall()
         logger.info(f"[APPROVE] Downloaded blob: {len(file_bytes)} bytes")
- 
+
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"[APPROVE] Blob download failed: {e}", exc_info=True)
         raise HTTPException(500, f"Failed to download file from storage: {str(e)}")
- 
+
     # Upload to AI Foundry / Vector Store
     agent_file_id = None
     try:
         upload_result = upload_pdf_to_agent(file_bytes, filename)
- 
+
         if upload_result and upload_result.get("success"):
             agent_file_id = upload_result.get("file_id")
             logger.info(f"[APPROVE] Uploaded to AI KB | file_id={agent_file_id}")
         else:
             logger.warning(f"[APPROVE] AI KB upload returned no file_id, continuing approval")
- 
+
     except Exception as e:
         logger.error(f"[APPROVE] AI KB upload failed: {e}", exc_info=True)
         # Don't fail the approval
- 
+
     # Update MongoDB
     update_fields = {
         "templates.$.status": "approved",
@@ -791,11 +806,11 @@ def approve_template(
    
     if agent_file_id:
         update_fields["templates.$.agent_file_id"] = agent_file_id
- 
+
     # Also ensure blob_name and file_name are set (in case they were missing)
     update_fields["templates.$.blob_name"] = blob_name
     update_fields["templates.$.file_name"] = filename
- 
+
     update_result = users_collection.update_one(
         {"_id": ObjectId(user_id), "templates.template_id": template_id},
         {
@@ -826,6 +841,7 @@ def approve_template(
     )
 
 @router.post("/reject-template", response_model=TemplateActionResponse)
+@log_function_call
 def reject_template(
     user_id: str = Query(..., description="User ID"),
     template_id: str = Query(..., description="Template ID"),
@@ -911,6 +927,7 @@ def reject_template(
 # DEBUG ENDPOINT - Check template data
 # ============================================================
 @router.get("/debug/template/{template_id}")
+@log_function_call
 def debug_template(
     template_id: str,
     admin: dict = Depends(require_admin)
